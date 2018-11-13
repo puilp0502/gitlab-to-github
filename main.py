@@ -1,10 +1,18 @@
+import re
 import json
 import time
 import getpass
 
 import gitlab
 import requests
-import requests.auth
+
+
+def parse_link_header(link):
+    link_obj = {}
+    for link in link.split(','):
+        match = re.search(r'<(.*)>;\W*rel="(\w*)"', link)
+        link_obj[match.group(2)] = match.group(1)
+    return link_obj
 
 
 def main():
@@ -37,15 +45,25 @@ def main():
         print("{}: {} (ID {})".format(i+1, issue.title, issue.id))
         issue.notes_local = issue.notes.list(sort='asc')
 
-    github_api = "https://api.github.com/"
+    github_host = "https://api.github.com"
     github_name = input("Github Username: ")
     github_pass = getpass.getpass("Github Password: ")
     github_auth = requests.auth.HTTPBasicAuth(github_name, github_pass)
 
     print("Parsing Repositories...")
-    repos = requests.get(github_api+"user/repos", auth=github_auth)
-    repos.raise_for_status()
-    repos = repos.json()
+    repos = []
+    repo_next = "{}/user/repos".format(github_host)
+    while True:
+        resp = requests.get(repo_next, auth=github_auth)
+        resp.raise_for_status()
+        repos += resp.json()
+
+        links = parse_link_header(resp.headers['Link'])
+        if 'next' in links:
+            repo_next = links['next']
+        else:
+            break
+
     for i, repo in enumerate(repos):
         print(str(i)+": "+repo['full_name'])
     repo = repos[int(input("Select repo: "))]
@@ -53,28 +71,28 @@ def main():
     print("Creating labels...")
     for label in labels:
         post_data = {
-            "name": label['name'],
-            "color": label['color'][1:]  # Remove leading '#' symbol
+            "name": label.name,
+            "color": label.color[1:]  # Remove leading '#' symbol
         }
-        r = requests.post(github_api+"repos/"+repo['full_name']+"/labels",
-                          auth=github_auth, data=json.dumps(post_data))
+        url = "{}/repos/{}/labels".format(github_host, repo['full_name'])
+        r = requests.post(url, auth=github_auth, data=json.dumps(post_data))
         print(r.text)
 
     print("Creating issues and comments...")
     for issue in issues:
-        print("Creating issue "+issue['title'])
+        print("Creating issue "+issue.title)
         post_data = {
-            "title": issue['title'],
-            "body": issue['description']+" \r\ncreated by @"+issue['author']['username'],
-            "labels": issue['labels'],
+            "title": issue.title,
+            "body": issue.description+" \r\ncreated by @"+issue.author['username'],
+            "labels": issue.labels,
         }
-        if issue['assignee'] is not None:
-            post_data['assignee'] = issue['assignee']['username']
+        if issue.assignee is not None:
+            post_data['assignee'] = issue.assignee['username']
 
         skip_issue = False
         while True:
-            resp = requests.post(github_api+"repos/"+repo['full_name']+"/issues",
-                                auth=github_auth, data=json.dumps(post_data)).json()
+            url = "{}/repos/{}/issues".format(github_host, repo['full_name'])
+            resp = requests.post(url, auth=github_auth, data=json.dumps(post_data)).json()
             print(resp)
             if 'errors' in resp:
                 if resp['errors'][0]['field'] == 'assignee':
@@ -90,12 +108,12 @@ def main():
             continue
 
         issue_number = resp['number']
-        for comment in issue['comments']:
+        for comment in issue.notes_local:
             post_data = {
-                "body": comment['body']+" \r\ncreated by @"+comment['author']['username']
+                "body": comment.body+" \r\ncreated by @"+comment.author['username']
             }
-            r = requests.post(github_api+"repos/"+repo['full_name']+"/issues/"+str(resp['number'])+"/comments",
-                          auth=github_auth, data=json.dumps(post_data))
+            url = "{}/repos/{}/issues/{}/comments".format(github_host, repo['full_name'], resp['number'])
+            r = requests.post(url, auth=github_auth, data=json.dumps(post_data))
             print(r.text)
             time.sleep(0.5)  # Github will be angry if we're too fast
 
